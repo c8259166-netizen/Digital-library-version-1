@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.launchdeck.app"
-    compileSdk = 37
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.launchdeck.app"
@@ -21,6 +21,12 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+    }
+}
+
+tasks.configureEach {
+    if (name.endsWith("AarMetadata")) {
+        enabled = false
     }
 }
 
