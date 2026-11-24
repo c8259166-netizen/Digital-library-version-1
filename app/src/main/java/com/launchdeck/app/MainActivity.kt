@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ResolveInfo
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
@@ -332,10 +333,33 @@ class MainActivity : Activity() {
 
     // ---------- Icons ----------
 
+    private fun toBitmap(source: Drawable): Bitmap {
+        val size = 48
+        val d = source.constantState?.newDrawable()?.mutate() ?: source.mutate()
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        d.setBounds(0, 0, size, size)
+        d.draw(canvas)
+        return bmp
+    }
+
+    /** True when the picture is (almost) fully see-through, like many Meta system app icons. */
+    private fun isBlank(bmp: Bitmap): Boolean {
+        val w = bmp.width
+        val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        var visible = 0
+        for (p in px) {
+            if (Color.alpha(p) > 40) visible++
+        }
+        return visible < px.size * 0.04
+    }
+
     private fun iconFor(e: AppEntry): Drawable? {
         if (iconCache.containsKey(e.pkg)) return iconCache[e.pkg]
         val pm = packageManager
-        val defaultState = try { pm.defaultActivityIcon.constantState } catch (_: Exception) { null }
+        val defaultBmp = try { toBitmap(pm.defaultActivityIcon) } catch (_: Exception) { null }
         var result: Drawable? = null
         val tries = listOf<() -> Drawable?>(
             { pm.getActivityIcon(e.component) },
@@ -343,11 +367,13 @@ class MainActivity : Activity() {
         )
         for (t in tries) {
             val d = try { t() } catch (_: Exception) { null }
-            if (d != null) {
-                val state = d.constantState
-                val isDefault = state != null && defaultState != null && state == defaultState
-                if (!isDefault) { result = d; break }
-            }
+            if (d == null) continue
+            val bmp = try { toBitmap(d) } catch (_: Exception) { null }
+            if (bmp == null) continue
+            if (isBlank(bmp)) continue
+            if (defaultBmp != null && bmp.sameAs(defaultBmp)) continue
+            result = d
+            break
         }
         iconCache[e.pkg] = result
         return result
