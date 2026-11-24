@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.launchdeck.app"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.launchdeck.app"
@@ -19,14 +19,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 }
 
-tasks.configureEach {
-    if (name.endsWith("AarMetadata")) {
-        enabled = false
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
