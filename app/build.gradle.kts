@@ -1,3 +1,4 @@
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -29,4 +30,5 @@ kotlin {
 
 dependencies {
     implementation("com.flyfishxu:kadb:2.1.5")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
 }
