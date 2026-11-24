@@ -15,9 +15,24 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Install Android SDK pieces
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-37" || "$SDKM" "platforms;android-37.0" || true
+          "$SDKM" "build-tools;36.0.0" || true
+          echo "Installed platforms:"
+          ls "$SDK/platforms"
+          if [ -d "$SDK/platforms/android-37.0" ] && [ ! -d "$SDK/platforms/android-37" ]; then
+            mv "$SDK/platforms/android-37.0" "$SDK/platforms/android-37"
+            sed -i 's/android-37\.0/android-37/g' "$SDK/platforms/android-37/package.xml"
+          fi
+          ls "$SDK/platforms"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.7
+          gradle-version: 9.6.0
 
       - name: Build debug APK
         run: gradle assembleDebug
@@ -26,4 +41,3 @@ jobs:
         with:
           name: digital-library-apk
           path: app/build/outputs/apk/debug/app-debug.apk
-          
