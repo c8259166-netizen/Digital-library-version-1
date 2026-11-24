@@ -24,7 +24,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import dev.mobile.dadb.Dadb
+import dadb.Dadb
 import kotlin.concurrent.thread
 
 data class AppEntry(val label: String, val pkg: String, val isGame: Boolean)
