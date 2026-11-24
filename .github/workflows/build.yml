@@ -15,6 +15,13 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Install Android platform 37
+        run: |
+          SDKM="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-37" || "$SDKM" "platforms;android-37.0"
+          "$SDKM" --list_installed | grep -i "android-37"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
