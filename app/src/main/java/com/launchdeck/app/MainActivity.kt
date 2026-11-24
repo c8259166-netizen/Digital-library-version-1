@@ -31,6 +31,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.flyfishxu.kadb.Kadb
+import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 data class AppEntry(
@@ -167,8 +168,8 @@ class MainActivity : Activity() {
                 setStatus("Pairing...")
                 thread {
                     val ok = try {
-                        val r: Any? = Kadb.pair("127.0.0.1", port, code)
-                        r != false
+                        runBlocking { Kadb.pair("127.0.0.1", port, code) }
+                        true
                     } catch (e: Throwable) {
                         false
                     }
