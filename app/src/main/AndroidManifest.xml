@@ -10,8 +10,6 @@
 
     <application
         android:label="Digital Library"
-        android:icon="@drawable/ic_launcher"
-        android:roundIcon="@drawable/ic_launcher"
         android:largeHeap="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
