@@ -371,6 +371,7 @@ class MainActivity : Activity() {
     private val bg = Color.parseColor("#000000")
     private val panel = Color.parseColor("#1C1C1E")
     private val accent = Color.parseColor("#2F6BFF")
+    private val discordUrl = "https://discord.gg/5DCpxypsD"
 
     private var allApps: List<AppEntry> = emptyList()
     private lateinit var screen: FrameLayout
@@ -575,6 +576,46 @@ class MainActivity : Activity() {
 
     // ---------- Library screen ----------
 
+    /**
+     * Discord button. If you add a picture named discord_logo.png to res/drawable it is shown,
+     * otherwise a simple blue badge is used.
+     */
+    private fun discordButton(): View {
+        val resId = resources.getIdentifier("discord_logo", "drawable", packageName)
+        val btn = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = round(panel, 14)
+            setPadding(dp(12), dp(6), dp(16), dp(6))
+            setOnClickListener {
+                tryOpen("Discord", Intent(Intent.ACTION_VIEW, Uri.parse(discordUrl)))
+            }
+        }
+        val logo: View = if (resId != 0) {
+            ImageView(this).apply {
+                setImageResource(resId)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+        } else {
+            TextView(this).apply {
+                text = "D"
+                setTextColor(Color.WHITE)
+                textSize = 18f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                background = round(accent, 20)
+            }
+        }
+        btn.addView(logo, LinearLayout.LayoutParams(dp(36), dp(36)))
+        btn.addView(TextView(this).apply {
+            text = "Discord"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setPadding(dp(10), 0, 0, 0)
+        })
+        return btn
+    }
+
     private fun showLibrary() {
         screen.removeAllViews()
         tabButtons.clear()
@@ -583,13 +624,19 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(16), dp(24), dp(16))
         }
-        root.addView(TextView(this).apply {
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, 0, dp(10))
+        }
+        titleRow.addView(TextView(this).apply {
             text = "Digital Library"
             setTextColor(Color.WHITE)
             textSize = 28f
             setTypeface(null, Typeface.BOLD)
-            setPadding(dp(4), 0, 0, dp(10))
         })
+        titleRow.addView(discordButton(), LinearLayout.LayoutParams(-2, dp(48)).apply { leftMargin = dp(20) })
+        root.addView(titleRow)
 
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -989,6 +1036,16 @@ class MainActivity : Activity() {
                 "setprop debug.oculus.gpuLevel 4"
             )
 
+    private fun minCmds(): List<String> =
+        listOf("setprop debug.oculus.refreshRate 72") +
+            resolutionCmds(0.5) +
+            listOf(
+                "setprop debug.oculus.foveation.level 4",
+                "setprop debug.oculus.foveation.dynamic 0",
+                "setprop debug.oculus.cpuLevel 0",
+                "setprop debug.oculus.gpuLevel 0"
+            )
+
     /** Runs several commands over one Wireless debugging connection. */
     private fun runCommands(cmds: List<String>, okMsg: String) {
         val port = connectPort
@@ -1016,7 +1073,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun choiceRow(items: List<Pair<String, () -> Unit>>, widthDp: Int = 130): View {
+    private fun choiceRow(items: List<Pair<String, () -> Unit>>, widthDp: Int = 120): View {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         items.forEach { (label, action) ->
             row.addView(
@@ -1149,27 +1206,36 @@ class MainActivity : Activity() {
                 "Max graphics on: ${maxHz()} Hz, resolution 1.5x, foveation off, CPU and GPU level 4"
             )
         }, LinearLayout.LayoutParams(dp(380), dp(64)).apply { topMargin = dp(4) })
+        col.addView(bigButton("MIN GRAPHICS (lowest possible)", panel) {
+            runCommands(
+                minCmds(),
+                "Min graphics on: 72 Hz, resolution 0.5x, strongest edge blur, CPU and GPU level 0"
+            )
+        }, LinearLayout.LayoutParams(dp(380), dp(64)).apply { topMargin = dp(10) })
         col.addView(bigButton("Reset graphics to normal", panel) {
             runCommands(resetCmds, "Graphics put back to normal")
         }, LinearLayout.LayoutParams(dp(380), dp(56)).apply { topMargin = dp(10) })
 
         col.addView(subheading("Resolution (sharpness)"))
-        col.addView(note("Multiplies the default render size of your headset. Higher is sharper but needs more power. 1.5x is a good maximum for most games."))
+        col.addView(note("Multiplies the default render size of your headset. Higher is sharper but needs more power. 1.5x is a good maximum for most games. 0.5x is the lowest."))
         col.addView(choiceRow(listOf(
+            Pair("0.5x") { runCommands(resolutionCmds(0.5), "Resolution 0.5x (lowest)") },
+            Pair("0.75x") { runCommands(resolutionCmds(0.75), "Resolution 0.75x") },
             Pair("1x normal") { runCommands(resolutionCmds(1.0), "Resolution 1x") },
             Pair("1.25x") { runCommands(resolutionCmds(1.25), "Resolution 1.25x") },
             Pair("1.5x") { runCommands(resolutionCmds(1.5), "Resolution 1.5x") },
             Pair("2x") { runCommands(resolutionCmds(2.0), "Resolution 2x (very heavy)") }
-        )))
+        ), 110))
 
         col.addView(subheading("Foveated rendering (edge blur)"))
-        col.addView(note("Blurs the edges of the picture to save power. Off is the sharpest."))
+        col.addView(note("Blurs the edges of the picture to save power. Off is the sharpest, Highest is the blurriest."))
         col.addView(choiceRow(listOf(
             Pair("Off") { runCommands(listOf("setprop debug.oculus.foveation.level 0"), "Foveation off") },
             Pair("Low") { runCommands(listOf("setprop debug.oculus.foveation.level 1"), "Foveation low") },
             Pair("Medium") { runCommands(listOf("setprop debug.oculus.foveation.level 2"), "Foveation medium") },
-            Pair("High") { runCommands(listOf("setprop debug.oculus.foveation.level 3"), "Foveation high") }
-        )))
+            Pair("High") { runCommands(listOf("setprop debug.oculus.foveation.level 3"), "Foveation high") },
+            Pair("Highest") { runCommands(listOf("setprop debug.oculus.foveation.level 4"), "Foveation highest") }
+        ), 120))
 
         col.addView(subheading("Dynamic foveation"))
         col.addView(note("Some games lower the sharpness by themselves when busy. Turn it off to keep the level you chose."))
@@ -1179,7 +1245,7 @@ class MainActivity : Activity() {
         ), 190))
 
         col.addView(subheading("Processor power"))
-        col.addView(note("Forces the headset's CPU and GPU to a high power level (4)."))
+        col.addView(note("Forces the headset's CPU and GPU to a power level. 4 is high, 0 is the lowest."))
         col.addView(choiceRow(listOf(
             Pair("CPU max") { runCommands(listOf("setprop debug.oculus.cpuLevel 4"), "CPU level 4") },
             Pair("GPU max") { runCommands(listOf("setprop debug.oculus.gpuLevel 4"), "GPU level 4") },
@@ -1189,13 +1255,19 @@ class MainActivity : Activity() {
                     "CPU and GPU level 4"
                 )
             },
+            Pair("Both lowest") {
+                runCommands(
+                    listOf("setprop debug.oculus.cpuLevel 0", "setprop debug.oculus.gpuLevel 0"),
+                    "CPU and GPU level 0"
+                )
+            },
             Pair("Both default") {
                 runCommands(
                     listOf("setprop debug.oculus.cpuLevel ''", "setprop debug.oculus.gpuLevel ''"),
                     "CPU and GPU back to default"
                 )
             }
-        ), 160))
+        ), 150))
 
         col.addView(heading("Tile style"))
         val styleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
