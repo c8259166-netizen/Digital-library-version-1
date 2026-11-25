@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
@@ -17,10 +18,14 @@ import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.InputType
+import android.text.TextUtils
 import android.text.TextWatcher
+import android.util.LruCache
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
+import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -33,6 +38,14 @@ import android.widget.TextView
 import android.widget.Toast
 import com.flyfishxu.kadb.Kadb
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 data class AppEntry(
@@ -41,6 +54,249 @@ data class AppEntry(
     val component: ComponentName,
     val isGame: Boolean
 )
+
+enum class Kind { ICON, BANNER }
+
+/**
+ * Downloads store pictures and names from the MetaMetadata project (the same source
+ * Lightning Launcher uses), keeps them on disk, and hands out small bitmaps.
+ * All network and decoding work happens on background threads.
+ */
+class ArtStore(context: Context, private val onUpdate: () -> Unit) {
+    private val base = "https://raw.githubusercontent.com/threethan/MetaMetadata/main/data/common/"
+    private val week = 7L * 24 * 3600 * 1000
+    private val dir = File(context.filesDir, "art").apply { mkdirs() }
+    private val metaPool = Executors.newFixedThreadPool(3)
+    private val imgPool = Executors.newFixedThreadPool(4)
+    private val ui = Handler(Looper.getMainLooper())
+
+    private val cache = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 4).toInt()) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+    private val pending = ConcurrentHashMap.newKeySet<String>()
+    private val failed = ConcurrentHashMap.newKeySet<String>()
+    private val missing = ConcurrentHashMap.newKeySet<String>()
+    private val names = ConcurrentHashMap<String, String>()
+    private val metaMemo = ConcurrentHashMap<String, JSONObject>()
+    private val locks = ConcurrentHashMap<String, Any>()
+    private val notifyPosted = AtomicBoolean(false)
+
+    private val found = AtomicInteger(0)
+    private val notInStore = AtomicInteger(0)
+    private val netErrors = AtomicInteger(0)
+    @Volatile private var lastError = ""
+
+    fun nameOf(pkg: String): String? = names[pkg]
+
+    fun stats(): String {
+        val s = "Store data: ${found.get()} found, ${notInStore.get()} not in the store list, " +
+            "${netErrors.get()} network errors"
+        return if (lastError.isNotEmpty()) "$s\nLast error: $lastError" else s
+    }
+
+    /** Returns the picture if it is ready, otherwise starts loading it and returns null. */
+    fun get(pkg: String, kind: Kind): Bitmap? {
+        val key = kind.name + ":" + pkg
+        val hit = cache.get(key)
+        if (hit != null) return hit
+        if (failed.contains(key)) return null
+        if (pending.add(key)) {
+            imgPool.execute {
+                try {
+                    load(pkg, kind, key)
+                } catch (e: Throwable) {
+                    lastError = e.javaClass.simpleName
+                    failed.add(key)
+                } finally {
+                    pending.remove(key)
+                }
+            }
+        }
+        return null
+    }
+
+    /** Fetches the small data file for every app so names are right everywhere. */
+    fun prefetchNames(pkgs: List<String>) {
+        for (p in pkgs) {
+            metaPool.execute {
+                try {
+                    if (meta(p) != null) postUpdate()
+                } catch (_: Throwable) {
+                }
+            }
+        }
+    }
+
+    /** Forget everything and download again. */
+    fun refresh(pkgs: List<String>) {
+        cache.evictAll()
+        failed.clear()
+        missing.clear()
+        metaMemo.clear()
+        names.clear()
+        dir.listFiles()?.forEach { it.delete() }
+        found.set(0)
+        notInStore.set(0)
+        netErrors.set(0)
+        lastError = ""
+        prefetchNames(pkgs)
+        postUpdate()
+    }
+
+    private fun postUpdate() {
+        if (notifyPosted.compareAndSet(false, true)) {
+            ui.postDelayed({
+                notifyPosted.set(false)
+                onUpdate()
+            }, 300)
+        }
+    }
+
+    private fun load(pkg: String, kind: Kind, key: String) {
+        val file = File(dir, kind.name.lowercase() + "_" + pkg + ".img")
+        if (!file.exists() || file.length() == 0L) {
+            val m = meta(pkg)
+            if (m == null) {
+                failed.add(key)
+                return
+            }
+            var ok = false
+            for (u in urlsFor(m, kind)) {
+                if (download(u, file)) {
+                    ok = true
+                    break
+                }
+            }
+            if (!ok) {
+                failed.add(key)
+                return
+            }
+        }
+        val bmp = decode(file, if (kind == Kind.ICON) 256 else 480)
+        if (bmp == null) {
+            file.delete()
+            failed.add(key)
+            return
+        }
+        cache.put(key, bmp)
+        postUpdate()
+    }
+
+    private fun urlsFor(o: JSONObject, kind: Kind): List<String> {
+        val keys = if (kind == Kind.ICON) listOf("icon", "square", "landscape")
+        else listOf("landscape", "hero", "square")
+        return keys.map { str(o, it) }.filter { it.startsWith("http") }
+    }
+
+    private fun str(o: JSONObject, key: String): String =
+        if (o.isNull(key)) "" else o.optString(key, "")
+
+    private fun meta(pkg: String): JSONObject? {
+        val lock = locks.computeIfAbsent(pkg) { Any() }
+        return synchronized(lock) { metaLocked(pkg) }
+    }
+
+    private fun remember(pkg: String, o: JSONObject) {
+        metaMemo[pkg] = o
+        val n = str(o, "name")
+        if (n.isNotBlank()) names[pkg] = n
+        found.incrementAndGet()
+    }
+
+    private fun metaLocked(pkg: String): JSONObject? {
+        val memo = metaMemo[pkg]
+        if (memo != null) return memo
+        if (missing.contains(pkg)) return null
+
+        val f = File(dir, "meta_$pkg.json")
+        var stale: JSONObject? = null
+        if (f.exists()) {
+            val text = try { f.readText() } catch (_: Exception) { "" }
+            val fresh = System.currentTimeMillis() - f.lastModified() < week
+            if (text == "{}") {
+                if (fresh) {
+                    missing.add(pkg)
+                    notInStore.incrementAndGet()
+                    return null
+                }
+            } else if (text.isNotEmpty()) {
+                val o = try { JSONObject(text) } catch (_: Exception) { null }
+                if (o != null) {
+                    if (fresh) {
+                        remember(pkg, o)
+                        return o
+                    }
+                    stale = o
+                }
+            }
+        }
+
+        try {
+            val conn = URL(base + pkg + ".json").openConnection() as HttpURLConnection
+            conn.connectTimeout = 10000
+            conn.readTimeout = 15000
+            conn.setRequestProperty("User-Agent", "DigitalLibrary")
+            val code = conn.responseCode
+            if (code == 404) {
+                conn.disconnect()
+                f.writeText("{}")
+                missing.add(pkg)
+                notInStore.incrementAndGet()
+                return null
+            }
+            if (code != 200) {
+                conn.disconnect()
+                netErrors.incrementAndGet()
+                lastError = "HTTP $code"
+                if (stale != null) remember(pkg, stale)
+                return stale
+            }
+            val text = conn.inputStream.bufferedReader().use { it.readText() }
+            conn.disconnect()
+            val o = JSONObject(text)
+            f.writeText(text)
+            remember(pkg, o)
+            return o
+        } catch (e: Exception) {
+            netErrors.incrementAndGet()
+            lastError = e.javaClass.simpleName + (e.message?.let { ": " + it.take(60) } ?: "")
+            if (stale != null) remember(pkg, stale)
+            return stale
+        }
+    }
+
+    private fun download(url: String, dest: File): Boolean {
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 10000
+            conn.readTimeout = 20000
+            conn.setRequestProperty("User-Agent", "DigitalLibrary")
+            if (conn.responseCode != 200) {
+                conn.disconnect()
+                false
+            } else {
+                val tmp = File(dest.parentFile, dest.name + ".tmp")
+                conn.inputStream.use { input -> tmp.outputStream().use { out -> input.copyTo(out) } }
+                conn.disconnect()
+                tmp.renameTo(dest)
+            }
+        } catch (e: Exception) {
+            netErrors.incrementAndGet()
+            lastError = e.javaClass.simpleName + (e.message?.let { ": " + it.take(60) } ?: "")
+            false
+        }
+    }
+
+    private fun decode(file: File, targetW: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.path, bounds)
+        if (bounds.outWidth <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= targetW) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        return BitmapFactory.decodeFile(file.path, opts)
+    }
+}
 
 /** Decorative background: soft white and blue shapes on black. */
 class ShapesView(context: Context) : View(context) {
@@ -89,6 +345,12 @@ class MainActivity : Activity() {
     private val iconCache = HashMap<String, Drawable?>()
     private val handler = Handler(Looper.getMainLooper())
 
+    // Store pictures
+    private lateinit var art: ArtStore
+    private var style = Kind.ICON
+    private var gridAdapter: BaseAdapter? = null
+    private var artStatsView: TextView? = null
+
     // Wireless debugging state
     private var connectPort: Int? = null
     private var status = "Not connected"
@@ -97,6 +359,14 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         allApps = loadApps()
+
+        val saved = getSharedPreferences("digitallibrary", MODE_PRIVATE).getString("style", "icon")
+        style = if (saved == "banner") Kind.BANNER else Kind.ICON
+        art = ArtStore(this) {
+            gridAdapter?.notifyDataSetChanged()
+            artStatsView?.text = art.stats()
+        }
+        art.prefetchNames(allApps.map { it.pkg })
 
         val frame = FrameLayout(this).apply { setBackgroundColor(bg) }
         frame.addView(ShapesView(this), FrameLayout.LayoutParams(-1, -1))
@@ -243,6 +513,8 @@ class MainActivity : Activity() {
         tabButtons.forEachIndexed { i, b -> b.background = round(if (i == index) accent else panel, 14) }
         content.removeAllViews()
         statusView = null
+        gridAdapter = null
+        artStatsView = null
         when (index) {
             0 -> content.addView(appGrid(allApps))
             1 -> content.addView(appGrid(allApps.filter { !it.isGame }))
@@ -252,6 +524,8 @@ class MainActivity : Activity() {
     }
 
     // ---------- App list with search bar ----------
+
+    private fun labelOf(e: AppEntry): String = art.nameOf(e.pkg) ?: e.label
 
     private fun appGrid(source: List<AppEntry>): View {
         var shown = source
@@ -269,7 +543,7 @@ class MainActivity : Activity() {
         col.addView(search, LinearLayout.LayoutParams(-1, dp(56)))
 
         val grid = GridView(this).apply {
-            numColumns = 6
+            numColumns = if (style == Kind.BANNER) 4 else 6
             horizontalSpacing = dp(12)
             verticalSpacing = dp(12)
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
@@ -280,44 +554,101 @@ class MainActivity : Activity() {
             override fun getItemId(p: Int) = p.toLong()
             override fun getView(p: Int, v: View?, parent: ViewGroup?): View {
                 val e = shown[p]
-                val tile = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.CENTER
-                    background = round(panel, 18)
-                    setPadding(dp(8), dp(12), dp(8), dp(12))
-                }
-                val icon = iconFor(e)
-                if (icon != null) {
-                    val img = ImageView(this@MainActivity)
-                    img.setImageDrawable(icon)
-                    tile.addView(img, LinearLayout.LayoutParams(dp(72), dp(72)))
-                } else {
-                    tile.addView(letterTile(e), LinearLayout.LayoutParams(dp(72), dp(72)))
-                }
-                tile.addView(TextView(this@MainActivity).apply {
-                    text = e.label
-                    setTextColor(Color.WHITE)
-                    textSize = 14f
-                    gravity = Gravity.CENTER
-                    maxLines = 2
-                })
-                return tile
+                return if (style == Kind.BANNER) bannerTile(e) else iconTile(e)
             }
         }
         grid.adapter = adapter
+        gridAdapter = adapter
         grid.setOnItemClickListener { _, _, pos, _ -> launch(shown[pos]) }
         col.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(12) })
 
         search.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
                 val q = s.toString().trim().lowercase()
-                shown = if (q.isEmpty()) source else source.filter { it.label.lowercase().contains(q) }
+                shown = if (q.isEmpty()) source else source.filter {
+                    labelOf(it).lowercase().contains(q) || it.label.lowercase().contains(q)
+                }
                 adapter.notifyDataSetChanged()
             }
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
         return col
+    }
+
+    private fun iconTile(e: AppEntry): View {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = round(panel, 18)
+            setPadding(dp(8), dp(12), dp(8), dp(12))
+        }
+        val bmp = art.get(e.pkg, Kind.ICON)
+        val pic: View = if (bmp != null) {
+            ImageView(this).apply {
+                setImageBitmap(bmp)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                clipRound(this, 18)
+            }
+        } else {
+            localPicture(e)
+        }
+        tile.addView(pic, LinearLayout.LayoutParams(dp(88), dp(88)))
+        tile.addView(TextView(this).apply {
+            text = labelOf(e)
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            gravity = Gravity.CENTER
+            maxLines = 2
+            setPadding(0, dp(6), 0, 0)
+        })
+        return tile
+    }
+
+    private fun bannerTile(e: AppEntry): View {
+        val tile = FrameLayout(this).apply { background = round(panel, 18) }
+        val bmp = art.get(e.pkg, Kind.BANNER)
+        if (bmp != null) {
+            val img = ImageView(this).apply {
+                setImageBitmap(bmp)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }
+            tile.addView(img, FrameLayout.LayoutParams(-1, -1))
+        } else {
+            tile.addView(localPicture(e), FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
+        }
+        tile.addView(TextView(this).apply {
+            text = labelOf(e)
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+        }, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        clipRound(tile, 18)
+        tile.layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(130))
+        return tile
+    }
+
+    /** The picture that was used before store pictures: the app's own icon, or a letter tile. */
+    private fun localPicture(e: AppEntry): View {
+        val icon = iconFor(e)
+        return if (icon != null) {
+            ImageView(this).apply { setImageDrawable(icon) }
+        } else {
+            letterTile(e)
+        }
+    }
+
+    private fun clipRound(v: View, radiusDp: Int) {
+        val r = dp(radiusDp).toFloat()
+        v.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: android.graphics.Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, r)
+            }
+        }
+        v.clipToOutline = true
     }
 
     private fun launch(e: AppEntry) {
@@ -327,11 +658,11 @@ class MainActivity : Activity() {
         try {
             startActivity(i)
         } catch (ex: Exception) {
-            Toast.makeText(this, "Couldn't open ${e.label}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Couldn't open ${labelOf(e)}", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // ---------- Icons ----------
+    // ---------- Local icons (backup) ----------
 
     private fun toBitmap(source: Drawable): Bitmap {
         val size = 48
@@ -385,7 +716,7 @@ class MainActivity : Activity() {
         return FrameLayout(this).apply {
             background = round(color, 16)
             addView(TextView(this@MainActivity).apply {
-                text = e.label.firstOrNull()?.uppercase() ?: "?"
+                text = labelOf(e).firstOrNull()?.uppercase() ?: "?"
                 setTextColor(Color.WHITE)
                 textSize = 30f
                 setTypeface(null, Typeface.BOLD)
@@ -395,6 +726,13 @@ class MainActivity : Activity() {
     }
 
     // ---------- Tools page ----------
+
+    private fun setStyle(k: Kind) {
+        style = k
+        getSharedPreferences("digitallibrary", MODE_PRIVATE).edit()
+            .putString("style", if (k == Kind.BANNER) "banner" else "icon").apply()
+        showTab(3)
+    }
 
     private fun toolsPage(): View {
         val scroll = ScrollView(this)
@@ -449,6 +787,29 @@ class MainActivity : Activity() {
         col.addView(buttonRow(listOf(72, 75, 80, 90, 120, 200)) { hz ->
             runShell("setprop debug.oculus.refreshRate $hz", "Refresh rate and FPS set to $hz")
         })
+
+        col.addView(heading("Tile style"))
+        val styleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        styleRow.addView(bigButton("Icons", if (style == Kind.ICON) accent else panel) { setStyle(Kind.ICON) },
+            LinearLayout.LayoutParams(dp(160), dp(56)).apply { setMargins(0, 0, dp(12), 0) })
+        styleRow.addView(bigButton("Banners", if (style == Kind.BANNER) accent else panel) { setStyle(Kind.BANNER) },
+            LinearLayout.LayoutParams(dp(160), dp(56)))
+        col.addView(styleRow)
+
+        col.addView(heading("Store pictures"))
+        val artText = TextView(this).apply {
+            text = art.stats()
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setPadding(0, 0, 0, dp(8))
+        }
+        artStatsView = artText
+        col.addView(artText)
+        col.addView(bigButton("Refresh pictures", panel) {
+            art.refresh(allApps.map { it.pkg })
+            artText.text = art.stats()
+        }, LinearLayout.LayoutParams(dp(220), dp(56)))
+        col.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet."))
         return scroll
     }
 
