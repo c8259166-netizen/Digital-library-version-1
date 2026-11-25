@@ -15,6 +15,7 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -936,6 +937,96 @@ class MainActivity : Activity() {
         showTab(3)
     }
 
+    // ---------- Graphics quality ----------
+
+    /** The default render size of this headset (from Meta's system properties page). */
+    private fun baseTexture(): Pair<Int, Int> {
+        val m = Build.MODEL.lowercase()
+        return when {
+            m.contains("quest 3") -> Pair(1680, 1760)
+            m.contains("quest 2") || m.contains("pro") -> Pair(1440, 1584)
+            else -> Pair(1216, 1344)
+        }
+    }
+
+    /** The highest refresh rate this headset supports. */
+    private fun maxHz(): Int {
+        val m = Build.MODEL.lowercase()
+        return when {
+            m.contains("quest 3") || m.contains("quest 2") -> 120
+            m.contains("pro") -> 90
+            else -> 72
+        }
+    }
+
+    private fun even(v: Double): Int = (Math.round(v / 2.0) * 2).toInt()
+
+    private fun resolutionCmds(scale: Double): List<String> {
+        val b = baseTexture()
+        return listOf(
+            "setprop debug.oculus.textureWidth ${even(b.first * scale)}",
+            "setprop debug.oculus.textureHeight ${even(b.second * scale)}"
+        )
+    }
+
+    private val resetCmds = listOf(
+        "setprop debug.oculus.textureWidth ''",
+        "setprop debug.oculus.textureHeight ''",
+        "setprop debug.oculus.foveation.level ''",
+        "setprop debug.oculus.foveation.dynamic ''",
+        "setprop debug.oculus.cpuLevel ''",
+        "setprop debug.oculus.gpuLevel ''",
+        "setprop debug.oculus.refreshRate 72"
+    )
+
+    private fun maxCmds(): List<String> =
+        listOf("setprop debug.oculus.refreshRate ${maxHz()}") +
+            resolutionCmds(1.5) +
+            listOf(
+                "setprop debug.oculus.foveation.level 0",
+                "setprop debug.oculus.foveation.dynamic 0",
+                "setprop debug.oculus.cpuLevel 4",
+                "setprop debug.oculus.gpuLevel 4"
+            )
+
+    /** Runs several commands over one Wireless debugging connection. */
+    private fun runCommands(cmds: List<String>, okMsg: String) {
+        val port = connectPort
+        if (port == null) {
+            Toast.makeText(this, "Not connected yet. Open Tools and tap Connect.", Toast.LENGTH_LONG).show()
+            return
+        }
+        thread {
+            val msg = try {
+                var fail: String? = null
+                Kadb.create("127.0.0.1", port).use { k ->
+                    for (c in cmds) {
+                        val r = k.shell(c)
+                        if (r.exitCode != 0) {
+                            fail = "Failed: ${r.output}"
+                            break
+                        }
+                    }
+                }
+                fail ?: okMsg
+            } catch (e: Throwable) {
+                "Couldn't connect. Open Tools and tap Connect."
+            }
+            runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    private fun choiceRow(items: List<Pair<String, () -> Unit>>, widthDp: Int = 130): View {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        items.forEach { (label, action) ->
+            row.addView(
+                bigButton(label, panel) { action() },
+                LinearLayout.LayoutParams(dp(widthDp), dp(56)).apply { setMargins(0, 0, dp(10), 0) }
+            )
+        }
+        return row
+    }
+
     private fun toolsPage(): View {
         val scroll = ScrollView(this)
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1044,6 +1135,67 @@ class MainActivity : Activity() {
         col.addView(buttonRow(listOf(72, 75, 80, 90, 120, 200)) { hz ->
             runShell("setprop debug.oculus.refreshRate $hz", "Refresh rate and FPS set to $hz")
         })
+
+        // ----- Graphics quality -----
+        col.addView(heading("Graphics quality"))
+        col.addView(note(
+            "These use Meta's own system settings. Restart a running game after changing them. " +
+            "They go back to normal when the headset restarts. Higher settings make the headset hotter and drain the battery faster."
+        ))
+
+        col.addView(bigButton("MAX GRAPHICS (all at once)", accent) {
+            runCommands(
+                maxCmds(),
+                "Max graphics on: ${maxHz()} Hz, resolution 1.5x, foveation off, CPU and GPU level 4"
+            )
+        }, LinearLayout.LayoutParams(dp(380), dp(64)).apply { topMargin = dp(4) })
+        col.addView(bigButton("Reset graphics to normal", panel) {
+            runCommands(resetCmds, "Graphics put back to normal")
+        }, LinearLayout.LayoutParams(dp(380), dp(56)).apply { topMargin = dp(10) })
+
+        col.addView(subheading("Resolution (sharpness)"))
+        col.addView(note("Multiplies the default render size of your headset. Higher is sharper but needs more power. 1.5x is a good maximum for most games."))
+        col.addView(choiceRow(listOf(
+            Pair("1x normal") { runCommands(resolutionCmds(1.0), "Resolution 1x") },
+            Pair("1.25x") { runCommands(resolutionCmds(1.25), "Resolution 1.25x") },
+            Pair("1.5x") { runCommands(resolutionCmds(1.5), "Resolution 1.5x") },
+            Pair("2x") { runCommands(resolutionCmds(2.0), "Resolution 2x (very heavy)") }
+        )))
+
+        col.addView(subheading("Foveated rendering (edge blur)"))
+        col.addView(note("Blurs the edges of the picture to save power. Off is the sharpest."))
+        col.addView(choiceRow(listOf(
+            Pair("Off") { runCommands(listOf("setprop debug.oculus.foveation.level 0"), "Foveation off") },
+            Pair("Low") { runCommands(listOf("setprop debug.oculus.foveation.level 1"), "Foveation low") },
+            Pair("Medium") { runCommands(listOf("setprop debug.oculus.foveation.level 2"), "Foveation medium") },
+            Pair("High") { runCommands(listOf("setprop debug.oculus.foveation.level 3"), "Foveation high") }
+        )))
+
+        col.addView(subheading("Dynamic foveation"))
+        col.addView(note("Some games lower the sharpness by themselves when busy. Turn it off to keep the level you chose."))
+        col.addView(choiceRow(listOf(
+            Pair("Dynamic off") { runCommands(listOf("setprop debug.oculus.foveation.dynamic 0"), "Dynamic foveation off") },
+            Pair("Dynamic default") { runCommands(listOf("setprop debug.oculus.foveation.dynamic ''"), "Dynamic foveation back to default") }
+        ), 190))
+
+        col.addView(subheading("Processor power"))
+        col.addView(note("Forces the headset's CPU and GPU to a high power level (4)."))
+        col.addView(choiceRow(listOf(
+            Pair("CPU max") { runCommands(listOf("setprop debug.oculus.cpuLevel 4"), "CPU level 4") },
+            Pair("GPU max") { runCommands(listOf("setprop debug.oculus.gpuLevel 4"), "GPU level 4") },
+            Pair("Both max") {
+                runCommands(
+                    listOf("setprop debug.oculus.cpuLevel 4", "setprop debug.oculus.gpuLevel 4"),
+                    "CPU and GPU level 4"
+                )
+            },
+            Pair("Both default") {
+                runCommands(
+                    listOf("setprop debug.oculus.cpuLevel ''", "setprop debug.oculus.gpuLevel ''"),
+                    "CPU and GPU back to default"
+                )
+            }
+        ), 160))
 
         col.addView(heading("Tile style"))
         val styleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -1236,6 +1388,14 @@ class MainActivity : Activity() {
         textSize = 22f
         setTypeface(null, Typeface.BOLD)
         setPadding(0, dp(24), 0, dp(8))
+    }
+
+    private fun subheading(t: String) = TextView(this).apply {
+        text = t
+        setTextColor(Color.WHITE)
+        textSize = 18f
+        setTypeface(null, Typeface.BOLD)
+        setPadding(0, dp(16), 0, dp(4))
     }
 
     private fun note(t: String) = TextView(this).apply {
