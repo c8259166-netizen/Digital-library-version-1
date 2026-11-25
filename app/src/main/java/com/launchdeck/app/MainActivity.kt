@@ -1,6 +1,7 @@
 package com.launchdeck.app
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -11,11 +12,13 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -52,10 +55,33 @@ data class AppEntry(
     val label: String,
     val pkg: String,
     val component: ComponentName,
-    val isGame: Boolean
+    val isVr: Boolean,
+    val androidGame: Boolean
 )
 
 enum class Kind { ICON, BANNER }
+
+/** Opens the launcher a few seconds after the headset starts, if the user turned that on in Tools. */
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val action = intent.action
+        if (action != Intent.ACTION_BOOT_COMPLETED && action != "android.intent.action.QUICKBOOT_POWERON") return
+        val prefs = context.getSharedPreferences("digitallibrary", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("autostart", false)) return
+        val pending = goAsync()
+        Thread {
+            try {
+                Thread.sleep(6000)
+                val i = Intent(context, MainActivity::class.java)
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(i)
+            } catch (_: Throwable) {
+            } finally {
+                pending.finish()
+            }
+        }.start()
+    }
+}
 
 /**
  * Downloads store pictures and names from the MetaMetadata project (the same source
@@ -87,6 +113,13 @@ class ArtStore(context: Context, private val onUpdate: () -> Unit) {
     @Volatile private var lastError = ""
 
     fun nameOf(pkg: String): String? = names[pkg]
+
+    /** The store category (for example Games or Apps) if the store data has one. */
+    fun categoryOf(pkg: String): String? {
+        val o = metaMemo[pkg] ?: return null
+        val c = str(o, "category")
+        return if (c.isBlank()) null else c
+    }
 
     fun stats(): String {
         val s = "Store data: ${found.get()} found, ${notInStore.get()} not in the store list, " +
@@ -348,7 +381,7 @@ class MainActivity : Activity() {
     // Store pictures
     private lateinit var art: ArtStore
     private var style = Kind.ICON
-    private var gridAdapter: BaseAdapter? = null
+    private var gridRefresh: (() -> Unit)? = null
     private var artStatsView: TextView? = null
 
     // Wireless debugging state
@@ -356,14 +389,15 @@ class MainActivity : Activity() {
     private var status = "Not connected"
     private var statusView: TextView? = null
 
+    private fun prefs() = getSharedPreferences("digitallibrary", MODE_PRIVATE)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         allApps = loadApps()
 
-        val saved = getSharedPreferences("digitallibrary", MODE_PRIVATE).getString("style", "icon")
-        style = if (saved == "banner") Kind.BANNER else Kind.ICON
+        style = if (prefs().getString("style", "icon") == "banner") Kind.BANNER else Kind.ICON
         art = ArtStore(this) {
-            gridAdapter?.notifyDataSetChanged()
+            gridRefresh?.invoke()
             artStatsView?.text = art.stats()
         }
         art.prefetchNames(allApps.map { it.pkg })
@@ -374,7 +408,45 @@ class MainActivity : Activity() {
         frame.addView(screen, FrameLayout.LayoutParams(-1, -1))
         setContentView(frame)
 
-        showPairing()
+        if (prefs().getBoolean("paired", false)) {
+            // Already paired once: go straight in and reconnect by itself.
+            connect(3)
+            showLibrary()
+        } else {
+            showPairing()
+        }
+    }
+
+    // ---------- Game or app ----------
+
+    private fun isGame(e: AppEntry): Boolean {
+        when (prefs().getString("cat_" + e.pkg, null)) {
+            "game" -> return true
+            "app" -> return false
+        }
+        val cat = art.categoryOf(e.pkg)?.lowercase()
+        if (cat != null) {
+            if (cat.contains("game")) return true
+            if (cat.contains("app")) return false
+        }
+        return e.isVr || e.androidGame
+    }
+
+    private fun moveDialog(e: AppEntry) {
+        val options = arrayOf("Move to Games", "Move to Apps", "Back to automatic")
+        android.app.AlertDialog.Builder(this)
+            .setTitle(labelOf(e))
+            .setItems(options) { _, which ->
+                val ed = prefs().edit()
+                when (which) {
+                    0 -> ed.putString("cat_" + e.pkg, "game")
+                    1 -> ed.putString("cat_" + e.pkg, "app")
+                    else -> ed.remove("cat_" + e.pkg)
+                }
+                ed.apply()
+                gridRefresh?.invoke()
+            }
+            .show()
     }
 
     // ---------- Pairing screen ----------
@@ -391,7 +463,7 @@ class MainActivity : Activity() {
             textSize = 30f
             setTypeface(null, Typeface.BOLD)
         })
-        col.addView(heading("Connect Wireless debugging"))
+        col.addView(heading("Connect Wireless debugging (only needed once)"))
         col.addView(note(
             "1. Turn on Wireless debugging in your headset's developer settings.\n" +
             "2. Choose to pair a device with a pairing code.\n" +
@@ -446,8 +518,9 @@ class MainActivity : Activity() {
                     }
                     runOnUiThread {
                         if (ok) {
+                            prefs().edit().putBoolean("paired", true).apply()
                             setStatus("Paired. Looking for the connection...")
-                            connect()
+                            connect(3)
                             showLibrary()
                         } else {
                             setStatus("Pairing failed. Check the code and port, and keep the pairing screen open.")
@@ -513,12 +586,12 @@ class MainActivity : Activity() {
         tabButtons.forEachIndexed { i, b -> b.background = round(if (i == index) accent else panel, 14) }
         content.removeAllViews()
         statusView = null
-        gridAdapter = null
+        gridRefresh = null
         artStatsView = null
         when (index) {
-            0 -> content.addView(appGrid(allApps))
-            1 -> content.addView(appGrid(allApps.filter { !it.isGame }))
-            2 -> content.addView(appGrid(allApps.filter { it.isGame }))
+            0 -> content.addView(appGrid { true })
+            1 -> content.addView(appGrid { !isGame(it) })
+            2 -> content.addView(appGrid { isGame(it) })
             3 -> content.addView(toolsPage())
         }
     }
@@ -527,8 +600,8 @@ class MainActivity : Activity() {
 
     private fun labelOf(e: AppEntry): String = art.nameOf(e.pkg) ?: e.label
 
-    private fun appGrid(source: List<AppEntry>): View {
-        var shown = source
+    private fun appGrid(filter: (AppEntry) -> Boolean): View {
+        var shown: List<AppEntry> = emptyList()
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val search = EditText(this).apply {
@@ -541,6 +614,14 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(10), dp(16), dp(10))
         }
         col.addView(search, LinearLayout.LayoutParams(-1, dp(56)))
+
+        fun compute() {
+            val q = search.text.toString().trim().lowercase()
+            shown = allApps.filter(filter).filter {
+                q.isEmpty() || labelOf(it).lowercase().contains(q) || it.label.lowercase().contains(q)
+            }
+        }
+        compute()
 
         val grid = GridView(this).apply {
             numColumns = if (style == Kind.BANNER) 4 else 6
@@ -558,17 +639,20 @@ class MainActivity : Activity() {
             }
         }
         grid.adapter = adapter
-        gridAdapter = adapter
+        gridRefresh = {
+            compute()
+            adapter.notifyDataSetChanged()
+        }
         grid.setOnItemClickListener { _, _, pos, _ -> launch(shown[pos]) }
+        grid.setOnItemLongClickListener { _, _, pos, _ ->
+            moveDialog(shown[pos])
+            true
+        }
         col.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(12) })
 
         search.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
-                val q = s.toString().trim().lowercase()
-                shown = if (q.isEmpty()) source else source.filter {
-                    labelOf(it).lowercase().contains(q) || it.label.lowercase().contains(q)
-                }
-                adapter.notifyDataSetChanged()
+                gridRefresh?.invoke()
             }
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -631,7 +715,7 @@ class MainActivity : Activity() {
         return tile
     }
 
-    /** The picture that was used before store pictures: the app's own icon, or a letter tile. */
+    /** The picture used when there is no store picture: the app's own icon, or a letter tile. */
     private fun localPicture(e: AppEntry): View {
         val icon = iconFor(e)
         return if (icon != null) {
@@ -729,8 +813,47 @@ class MainActivity : Activity() {
 
     private fun setStyle(k: Kind) {
         style = k
-        getSharedPreferences("digitallibrary", MODE_PRIVATE).edit()
-            .putString("style", if (k == Kind.BANNER) "banner" else "icon").apply()
+        prefs().edit().putString("style", if (k == Kind.BANNER) "banner" else "icon").apply()
+        showTab(3)
+    }
+
+    private fun tryOpen(what: String, vararg intents: Intent?) {
+        for (i in intents) {
+            if (i == null) continue
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try {
+                startActivity(i)
+                Toast.makeText(this, "Opening $what...", Toast.LENGTH_SHORT).show()
+                return
+            } catch (_: Exception) {
+            }
+        }
+        Toast.makeText(
+            this,
+            "Couldn't open $what on this headset. Try the Settings icon in your app list.",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
+    private fun setAutostart(on: Boolean) {
+        prefs().edit().putBoolean("autostart", on).apply()
+        if (on) {
+            if (connectPort != null) {
+                runShell(
+                    "appops set $packageName SYSTEM_ALERT_WINDOW allow",
+                    "Start at boot is on and allowed"
+                )
+            } else if (!Settings.canDrawOverlays(this)) {
+                tryOpen(
+                    "the permission screen",
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                )
+            } else {
+                Toast.makeText(this, "Start at boot is on", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "Start at boot is off", Toast.LENGTH_SHORT).show()
+        }
         showTab(3)
     }
 
@@ -782,6 +905,44 @@ class MainActivity : Activity() {
             }
         }, LinearLayout.LayoutParams(dp(200), dp(56)).apply { topMargin = dp(8) })
 
+        col.addView(heading("Developer settings"))
+        col.addView(note("Opens the headset's own settings. Newer headset software blocks some of these. If one does nothing, try the grey Settings icon in your app list."))
+        val devRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        devRow.addView(bigButton("Developer options", panel) {
+            tryOpen(
+                "developer options",
+                Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS),
+                Intent().setClassName("com.android.settings", "com.android.settings.DevelopmentSettings")
+            )
+        }, LinearLayout.LayoutParams(dp(230), dp(56)).apply { setMargins(0, 0, dp(12), 0) })
+        devRow.addView(bigButton("Wireless debugging", panel) {
+            tryOpen(
+                "wireless debugging",
+                Intent("android.settings.WIRELESS_DEBUGGING_SETTINGS"),
+                Intent().setClassName("com.android.settings", "com.android.settings.Settings\$WirelessDebuggingActivity"),
+                Intent().setClassName("com.android.settings", "com.android.settings.SubSettings")
+                    .putExtra(":settings:show_fragment", "com.android.settings.development.WirelessDebuggingFragment")
+            )
+        }, LinearLayout.LayoutParams(dp(250), dp(56)).apply { setMargins(0, 0, dp(12), 0) })
+        devRow.addView(bigButton("Android settings", panel) {
+            tryOpen(
+                "Android settings",
+                packageManager.getLaunchIntentForPackage("com.android.settings"),
+                Intent(Settings.ACTION_SETTINGS)
+            )
+        }, LinearLayout.LayoutParams(dp(230), dp(56)))
+        col.addView(devRow)
+
+        col.addView(heading("Start when the headset turns on"))
+        col.addView(note("Opens Digital Library a few seconds after the headset powers on. Meta doesn't officially support this, so it may not work on every headset."))
+        val on = prefs().getBoolean("autostart", false)
+        col.addView(
+            bigButton(if (on) "Start at boot: ON" else "Start at boot: OFF", if (on) accent else panel) {
+                setAutostart(!on)
+            },
+            LinearLayout.LayoutParams(dp(260), dp(56))
+        )
+
         col.addView(heading("Refresh rate and FPS (Hz)"))
         col.addView(note("Quest ties FPS to the refresh rate. Meta lists 72, 80, 90 and 120 for Quest 3. Restart a running game after changing it."))
         col.addView(buttonRow(listOf(72, 75, 80, 90, 120, 200)) { hz ->
@@ -809,7 +970,7 @@ class MainActivity : Activity() {
             art.refresh(allApps.map { it.pkg })
             artText.text = art.stats()
         }, LinearLayout.LayoutParams(dp(220), dp(56)))
-        col.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet."))
+        col.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet. Long-press any tile to move it between Apps and Games."))
         return scroll
     }
 
@@ -846,11 +1007,17 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun connect() {
+    /** Looks for Wireless debugging and connects. Retries a few times, useful right after boot. */
+    private fun connect(retries: Int = 0) {
         setStatus("Looking for Wireless debugging...")
         findConnectPort { port ->
             if (port == null) {
-                setStatus("Wireless debugging not found. Turn it on, then tap Connect in Tools.")
+                if (retries > 0) {
+                    setStatus("Waiting for Wireless debugging...")
+                    handler.postDelayed({ connect(retries - 1) }, 10000)
+                } else {
+                    setStatus("Wireless debugging not found. Turn it on, then tap Connect in Tools.")
+                }
                 return@findConnectPort
             }
             thread {
@@ -859,8 +1026,11 @@ class MainActivity : Activity() {
                     if (ok) {
                         connectPort = port
                         setStatus("Connected (port $port)")
+                    } else if (retries > 0) {
+                        setStatus("Couldn't connect yet, retrying...")
+                        handler.postDelayed({ connect(retries - 1) }, 10000)
                     } else {
-                        setStatus("Found port $port but couldn't connect. Try Pair again.")
+                        setStatus("Found port $port but couldn't connect. Try Pair again in Tools.")
                     }
                 }
             }
@@ -924,12 +1094,15 @@ class MainActivity : Activity() {
     private fun loadApps(): List<AppEntry> {
         val pm = packageManager
         val found = LinkedHashMap<String, ResolveInfo>()
+        val vrPkgs = HashSet<String>()
         val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val vr = Intent(Intent.ACTION_MAIN).addCategory("com.oculus.intent.category.VR")
-        for (i in listOf(launcher, vr)) {
-            for (ri in pm.queryIntentActivities(i, 0)) {
-                found.putIfAbsent(ri.activityInfo.packageName, ri)
-            }
+        for (ri in pm.queryIntentActivities(launcher, 0)) {
+            found.putIfAbsent(ri.activityInfo.packageName, ri)
+        }
+        for (ri in pm.queryIntentActivities(vr, 0)) {
+            vrPkgs.add(ri.activityInfo.packageName)
+            found.putIfAbsent(ri.activityInfo.packageName, ri)
         }
         return found.values
             .filter { it.activityInfo.packageName != packageName }
@@ -938,10 +1111,12 @@ class MainActivity : Activity() {
                 @Suppress("DEPRECATION")
                 val game = ai.category == android.content.pm.ApplicationInfo.CATEGORY_GAME ||
                     (ai.flags and android.content.pm.ApplicationInfo.FLAG_IS_GAME) != 0
+                val pkg = ai.packageName
                 AppEntry(
                     pm.getApplicationLabel(ai).toString(),
-                    ai.packageName,
+                    pkg,
                     ComponentName(ri.activityInfo.packageName, ri.activityInfo.name),
+                    vrPkgs.contains(pkg) && !pkg.startsWith("com.oculus.os."),
                     game
                 )
             }
