@@ -389,6 +389,25 @@ class MainActivity : Activity() {
     private var status = "Not connected"
     private var statusView: TextView? = null
 
+    // Commands that open the real Android settings (run through Wireless debugging).
+    private val cmdHome = listOf(
+        "am start -n com.android.settings/.homepage.SettingsHomepageActivity",
+        "am start -n com.android.settings/.Settings"
+    )
+    private val cmdApps = listOf(
+        "am start -n com.android.settings/.UsageStatsActivity",
+        "am start -a android.settings.MANAGE_ALL_APPLICATIONS_SETTINGS",
+        "am start -n 'com.android.settings/com.android.settings.Settings\$ManageApplicationsActivity'"
+    )
+    private val cmdDev = listOf(
+        "am start -n 'com.android.settings/com.android.settings.Settings\$DevelopmentSettingsDashboardActivity'",
+        "am start -a android.settings.APPLICATION_DEVELOPMENT_SETTINGS"
+    )
+    private val cmdWireless = listOf(
+        "am start -n 'com.android.settings/com.android.settings.Settings\$WirelessDebuggingActivity'",
+        "am start -n com.android.settings/.SubSettings --es :settings:show_fragment com.android.settings.development.WirelessDebuggingFragment"
+    )
+
     private fun prefs() = getSharedPreferences("digitallibrary", MODE_PRIVATE)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -433,18 +452,31 @@ class MainActivity : Activity() {
     }
 
     private fun moveDialog(e: AppEntry) {
-        val options = arrayOf("Move to Games", "Move to Apps", "Back to automatic")
+        val options = arrayOf(
+            "Move to Games",
+            "Move to Apps",
+            "Back to automatic",
+            "App info (Android settings)"
+        )
         android.app.AlertDialog.Builder(this)
             .setTitle(labelOf(e))
             .setItems(options) { _, which ->
-                val ed = prefs().edit()
-                when (which) {
-                    0 -> ed.putString("cat_" + e.pkg, "game")
-                    1 -> ed.putString("cat_" + e.pkg, "app")
-                    else -> ed.remove("cat_" + e.pkg)
+                if (which == 3) {
+                    openSettings(
+                        "app info",
+                        listOf("am start -a android.settings.APPLICATION_DETAILS_SETTINGS -d package:${e.pkg}"),
+                        listOf(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + e.pkg)))
+                    )
+                } else {
+                    val ed = prefs().edit()
+                    when (which) {
+                        0 -> ed.putString("cat_" + e.pkg, "game")
+                        1 -> ed.putString("cat_" + e.pkg, "app")
+                        else -> ed.remove("cat_" + e.pkg)
+                    }
+                    ed.apply()
+                    gridRefresh?.invoke()
                 }
-                ed.apply()
-                gridRefresh?.invoke()
             }
             .show()
     }
@@ -830,9 +862,56 @@ class MainActivity : Activity() {
         }
         Toast.makeText(
             this,
-            "Couldn't open $what on this headset. Try the Settings icon in your app list.",
+            "Couldn't open $what on this headset.",
             Toast.LENGTH_LONG
         ).show()
+    }
+
+    private fun comp(cls: String): Intent = Intent().setClassName("com.android.settings", cls)
+
+    /**
+     * Opens a screen of the real Android settings. When Wireless debugging is connected the
+     * command is sent through it (like from a PC). Otherwise it tries directly, which newer
+     * headset software may redirect to Meta Horizon settings.
+     */
+    private fun openSettings(what: String, commands: List<String>, direct: List<Intent>) {
+        val port = connectPort
+        if (port == null) {
+            Toast.makeText(
+                this,
+                "Not connected to Wireless debugging yet, trying directly. Meta may send this to Horizon settings instead.",
+                Toast.LENGTH_LONG
+            ).show()
+            tryOpen(what, *direct.toTypedArray())
+            return
+        }
+        thread {
+            var ok = false
+            try {
+                Kadb.create("127.0.0.1", port).use { k ->
+                    for (c in commands) {
+                        val r = k.shell(c)
+                        if (r.exitCode == 0 && !r.output.contains("Error") && !r.output.contains("Exception")) {
+                            ok = true
+                            break
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+            runOnUiThread {
+                if (ok) {
+                    Toast.makeText(this, "Opening $what...", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(
+                        this,
+                        "Couldn't open $what through Wireless debugging, trying directly.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    tryOpen(what, *direct.toTypedArray())
+                }
+            }
+        }
     }
 
     private fun setAutostart(on: Boolean) {
@@ -905,33 +984,50 @@ class MainActivity : Activity() {
             }
         }, LinearLayout.LayoutParams(dp(200), dp(56)).apply { topMargin = dp(8) })
 
-        col.addView(heading("Developer settings"))
-        col.addView(note("Opens the headset's own settings. Newer headset software blocks some of these. If one does nothing, try the grey Settings icon in your app list."))
-        val devRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        devRow.addView(bigButton("Developer options", panel) {
-            tryOpen(
-                "developer options",
-                Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS),
-                Intent().setClassName("com.android.settings", "com.android.settings.DevelopmentSettings")
+        col.addView(heading("Android settings"))
+        col.addView(note("Opens the headset's real Android settings, not Meta Horizon settings. Works best after the status above says Connected, because it opens them through Wireless debugging."))
+        val setRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        setRow1.addView(bigButton("Android settings", panel) {
+            openSettings(
+                "Android settings", cmdHome,
+                listOf(
+                    comp("com.android.settings.homepage.SettingsHomepageActivity"),
+                    comp("com.android.settings.Settings")
+                )
             )
-        }, LinearLayout.LayoutParams(dp(230), dp(56)).apply { setMargins(0, 0, dp(12), 0) })
-        devRow.addView(bigButton("Wireless debugging", panel) {
-            tryOpen(
-                "wireless debugging",
-                Intent("android.settings.WIRELESS_DEBUGGING_SETTINGS"),
-                Intent().setClassName("com.android.settings", "com.android.settings.Settings\$WirelessDebuggingActivity"),
-                Intent().setClassName("com.android.settings", "com.android.settings.SubSettings")
-                    .putExtra(":settings:show_fragment", "com.android.settings.development.WirelessDebuggingFragment")
+        }, LinearLayout.LayoutParams(dp(240), dp(56)).apply { setMargins(0, 0, dp(12), 0) })
+        setRow1.addView(bigButton("Apps list", panel) {
+            openSettings(
+                "the apps list", cmdApps,
+                listOf(
+                    comp("com.android.settings.UsageStatsActivity"),
+                    Intent(Settings.ACTION_MANAGE_ALL_APPLICATIONS_SETTINGS),
+                    comp("com.android.settings.Settings\$ManageApplicationsActivity")
+                )
             )
-        }, LinearLayout.LayoutParams(dp(250), dp(56)).apply { setMargins(0, 0, dp(12), 0) })
-        devRow.addView(bigButton("Android settings", panel) {
-            tryOpen(
-                "Android settings",
-                packageManager.getLaunchIntentForPackage("com.android.settings"),
-                Intent(Settings.ACTION_SETTINGS)
+        }, LinearLayout.LayoutParams(dp(200), dp(56)))
+        col.addView(setRow1)
+        val setRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        setRow2.addView(bigButton("Developer options", panel) {
+            openSettings(
+                "developer options", cmdDev,
+                listOf(
+                    comp("com.android.settings.Settings\$DevelopmentSettingsDashboardActivity"),
+                    Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                )
             )
-        }, LinearLayout.LayoutParams(dp(230), dp(56)))
-        col.addView(devRow)
+        }, LinearLayout.LayoutParams(dp(240), dp(56)).apply { setMargins(0, dp(10), dp(12), 0) })
+        setRow2.addView(bigButton("Wireless debugging", panel) {
+            openSettings(
+                "wireless debugging", cmdWireless,
+                listOf(
+                    comp("com.android.settings.Settings\$WirelessDebuggingActivity"),
+                    comp("com.android.settings.SubSettings")
+                        .putExtra(":settings:show_fragment", "com.android.settings.development.WirelessDebuggingFragment")
+                )
+            )
+        }, LinearLayout.LayoutParams(dp(250), dp(56)).apply { topMargin = dp(10) })
+        col.addView(setRow2)
 
         col.addView(heading("Start when the headset turns on"))
         col.addView(note("Opens Digital Library a few seconds after the headset powers on. Meta doesn't officially support this, so it may not work on every headset."))
@@ -970,7 +1066,7 @@ class MainActivity : Activity() {
             art.refresh(allApps.map { it.pkg })
             artText.text = art.stats()
         }, LinearLayout.LayoutParams(dp(220), dp(56)))
-        col.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet. Long-press any tile to move it between Apps and Games."))
+        col.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet. Long-press any tile to move it between Apps and Games, or to open its app info."))
         return scroll
     }
 
