@@ -12,6 +12,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
@@ -332,25 +333,24 @@ class ArtStore(context: Context, private val onUpdate: () -> Unit) {
     }
 }
 
-/** Decorative background: soft white and blue shapes on black. */
+/** Decorative background: soft white and gray shapes on black. */
 class ShapesView(context: Context) : View(context) {
     private val fill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
     private val stroke = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         style = android.graphics.Paint.Style.STROKE
         strokeWidth = 4f
     }
-    private val blue = Color.parseColor("#2F6BFF")
 
     override fun onDraw(c: android.graphics.Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        fill.color = blue; fill.alpha = 38
+        fill.color = Color.WHITE; fill.alpha = 22
         c.drawCircle(w * 0.90f, h * 0.15f, h * 0.30f, fill)
-        fill.color = Color.WHITE; fill.alpha = 14
+        fill.color = Color.WHITE; fill.alpha = 12
         c.drawCircle(w * 0.08f, h * 0.85f, h * 0.26f, fill)
         stroke.color = Color.WHITE; stroke.alpha = 40
         c.drawCircle(w * 0.55f, h * 0.95f, h * 0.18f, stroke)
-        stroke.color = blue; stroke.alpha = 90
+        stroke.color = Color.WHITE; stroke.alpha = 70
         c.drawCircle(w * 0.25f, h * 0.10f, h * 0.10f, stroke)
         fill.color = Color.WHITE; fill.alpha = 12
         c.save(); c.rotate(20f, w * 0.72f, h * 0.70f)
@@ -359,7 +359,7 @@ class ShapesView(context: Context) : View(context) {
         val tri = android.graphics.Path().apply {
             moveTo(w * 0.40f, h * 0.55f); lineTo(w * 0.47f, h * 0.72f); lineTo(w * 0.33f, h * 0.72f); close()
         }
-        fill.color = blue; fill.alpha = 30
+        fill.color = Color.WHITE; fill.alpha = 18
         c.drawPath(tri, fill)
         stroke.color = Color.WHITE; stroke.alpha = 35
         c.drawRect(w * 0.92f, h * 0.55f, w * 0.97f, h * 0.65f, stroke)
@@ -369,8 +369,10 @@ class ShapesView(context: Context) : View(context) {
 class MainActivity : Activity() {
 
     private val bg = Color.parseColor("#000000")
-    private val panel = Color.parseColor("#1C1C1E")
-    private val accent = Color.parseColor("#2F6BFF")
+    private val panel = Color.parseColor("#242424")      // buttons and tiles
+    private val card = Color.parseColor("#121212")       // section boxes
+    private val line = Color.parseColor("#2E2E2E")       // thin outlines
+    private val accent = Color.WHITE                     // selected / main buttons
     private val discordUrl = "https://discord.gg/5DCpxypsD"
 
     private var allApps: List<AppEntry> = emptyList()
@@ -578,14 +580,15 @@ class MainActivity : Activity() {
 
     /**
      * Discord button. If you add a picture named discord_logo.png to res/drawable it is shown,
-     * otherwise a simple blue badge is used.
+     * otherwise a simple white badge is used.
      */
     private fun discordButton(): View {
         val resId = resources.getIdentifier("discord_logo", "drawable", packageName)
         val btn = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = round(panel, 14)
+            background = stateBg(panel, 14)
+            isClickable = true
             setPadding(dp(12), dp(6), dp(16), dp(6))
             setOnClickListener {
                 tryOpen("Discord", Intent(Intent.ACTION_VIEW, Uri.parse(discordUrl)))
@@ -599,11 +602,11 @@ class MainActivity : Activity() {
         } else {
             TextView(this).apply {
                 text = "D"
-                setTextColor(Color.WHITE)
+                setTextColor(Color.BLACK)
                 textSize = 18f
                 setTypeface(null, Typeface.BOLD)
                 gravity = Gravity.CENTER
-                background = round(accent, 20)
+                background = round(Color.WHITE, 20)
             }
         }
         btn.addView(logo, LinearLayout.LayoutParams(dp(36), dp(36)))
@@ -663,7 +666,11 @@ class MainActivity : Activity() {
     }
 
     private fun showTab(index: Int) {
-        tabButtons.forEachIndexed { i, b -> b.background = round(if (i == index) accent else panel, 14) }
+        tabButtons.forEachIndexed { i, b ->
+            val selected = i == index
+            b.background = stateBg(if (selected) accent else panel, 14)
+            b.setTextColor(if (selected) Color.BLACK else Color.WHITE)
+        }
         content.removeAllViews()
         statusView = null
         gridRefresh = null
@@ -708,6 +715,8 @@ class MainActivity : Activity() {
             horizontalSpacing = dp(12)
             verticalSpacing = dp(12)
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            setPadding(0, 0, 0, dp(16))
+            clipToPadding = false
         }
         val adapter = object : BaseAdapter() {
             override fun getCount() = shown.size
@@ -728,7 +737,18 @@ class MainActivity : Activity() {
             moveDialog(shown[pos])
             true
         }
-        col.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(12) })
+
+        val empty = TextView(this).apply {
+            text = "Nothing found"
+            setTextColor(Color.GRAY)
+            textSize = 18f
+            gravity = Gravity.CENTER
+        }
+        val gridBox = FrameLayout(this)
+        gridBox.addView(grid, FrameLayout.LayoutParams(-1, -1))
+        gridBox.addView(empty, FrameLayout.LayoutParams(-1, -1))
+        grid.emptyView = empty
+        col.addView(gridBox, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(12) })
 
         search.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
@@ -744,7 +764,7 @@ class MainActivity : Activity() {
         val tile = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            background = round(panel, 18)
+            background = stateBg(panel, 18)
             setPadding(dp(8), dp(12), dp(8), dp(12))
         }
         val bmp = art.get(e.pkg, Kind.ICON)
@@ -764,13 +784,14 @@ class MainActivity : Activity() {
             textSize = 14f
             gravity = Gravity.CENTER
             maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
             setPadding(0, dp(6), 0, 0)
         })
         return tile
     }
 
     private fun bannerTile(e: AppEntry): View {
-        val tile = FrameLayout(this).apply { background = round(panel, 18) }
+        val tile = FrameLayout(this).apply { background = stateBg(panel, 18) }
         val bmp = art.get(e.pkg, Kind.BANNER)
         if (bmp != null) {
             val img = ImageView(this).apply {
@@ -788,7 +809,7 @@ class MainActivity : Activity() {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(10), dp(6), dp(10), dp(6))
-            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            setBackgroundColor(Color.argb(160, 0, 0, 0))
         }, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
         clipRound(tile, 18)
         tile.layoutParams = AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(130))
@@ -874,11 +895,10 @@ class MainActivity : Activity() {
         return result
     }
 
+    /** Backup tile when an app has no picture: a gray square with its first letter. */
     private fun letterTile(e: AppEntry): View {
-        val hue = (Math.abs(e.pkg.hashCode()) % 360).toFloat()
-        val color = Color.HSVToColor(floatArrayOf(hue, 0.35f, 0.45f))
         return FrameLayout(this).apply {
-            background = round(color, 16)
+            background = round(Color.parseColor("#3A3A3A"), 16)
             addView(TextView(this@MainActivity).apply {
                 text = labelOf(e).firstOrNull()?.uppercase() ?: "?"
                 setTextColor(Color.WHITE)
@@ -1084,12 +1104,32 @@ class MainActivity : Activity() {
         return row
     }
 
+    /** A rounded box with a title that holds one group of tools. */
+    private fun section(parent: LinearLayout, title: String): LinearLayout {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                setColor(card)
+                cornerRadius = dp(20).toFloat()
+                setStroke(dp(1), line)
+            }
+            setPadding(dp(20), dp(8), dp(20), dp(20))
+        }
+        box.addView(heading(title))
+        parent.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16) })
+        return box
+    }
+
     private fun toolsPage(): View {
         val scroll = ScrollView(this)
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, dp(8), dp(32))
+        }
         scroll.addView(col)
 
-        col.addView(heading("Wireless debugging"))
+        // ----- Wireless debugging -----
+        val s1 = section(col, "Wireless debugging")
         val statusText = TextView(this).apply {
             text = status
             setTextColor(Color.WHITE)
@@ -1097,16 +1137,16 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(8))
         }
         statusView = statusText
-        col.addView(statusText)
+        s1.addView(statusText)
 
         val connRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         connRow.addView(bigButton("Connect", accent) { connect() },
             LinearLayout.LayoutParams(dp(160), dp(56)).apply { setMargins(0, 0, dp(12), 0) })
         connRow.addView(bigButton("Pair again", panel) { showPairing() },
             LinearLayout.LayoutParams(dp(160), dp(56)))
-        col.addView(connRow)
+        s1.addView(connRow)
 
-        col.addView(note("If it can't find the port by itself, type the port from the Wireless debugging screen:"))
+        s1.addView(note("If it can't find the port by itself, type the port from the Wireless debugging screen:"))
         val portField = EditText(this).apply {
             hint = "Connection port"
             setHintTextColor(Color.GRAY)
@@ -1115,8 +1155,8 @@ class MainActivity : Activity() {
             background = round(panel, 14)
             setPadding(dp(16), dp(10), dp(16), dp(10))
         }
-        col.addView(portField, LinearLayout.LayoutParams(dp(240), dp(56)))
-        col.addView(bigButton("Use this port", panel) {
+        s1.addView(portField, LinearLayout.LayoutParams(dp(240), dp(56)))
+        s1.addView(bigButton("Use this port", panel) {
             val p = portField.text.toString().trim().toIntOrNull()
             if (p == null) {
                 setStatus("Type a port number first")
@@ -1132,8 +1172,9 @@ class MainActivity : Activity() {
             }
         }, LinearLayout.LayoutParams(dp(200), dp(56)).apply { topMargin = dp(8) })
 
-        col.addView(heading("Android settings"))
-        col.addView(note("Opens the headset's real Android settings, not Meta Horizon settings. Works best after the status above says Connected, because it opens them through Wireless debugging."))
+        // ----- Android settings -----
+        val s2 = section(col, "Android settings")
+        s2.addView(note("Opens the headset's real Android settings, not Meta Horizon settings. Works best after the status above says Connected, because it opens them through Wireless debugging."))
         val setRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         setRow1.addView(bigButton("Android settings", panel) {
             openSettings(
@@ -1154,7 +1195,7 @@ class MainActivity : Activity() {
                 )
             )
         }, LinearLayout.LayoutParams(dp(200), dp(56)))
-        col.addView(setRow1)
+        s2.addView(setRow1)
         val setRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         setRow2.addView(bigButton("Developer options", panel) {
             openSettings(
@@ -1175,50 +1216,52 @@ class MainActivity : Activity() {
                 )
             )
         }, LinearLayout.LayoutParams(dp(250), dp(56)).apply { topMargin = dp(10) })
-        col.addView(setRow2)
+        s2.addView(setRow2)
 
-        col.addView(heading("Start when the headset turns on"))
-        col.addView(note("Opens Digital Library a few seconds after the headset powers on. Meta doesn't officially support this, so it may not work on every headset."))
+        // ----- Start at boot -----
+        val s3 = section(col, "Start when the headset turns on")
+        s3.addView(note("Opens Digital Library a few seconds after the headset powers on. Meta doesn't officially support this, so it may not work on every headset."))
         val on = prefs().getBoolean("autostart", false)
-        col.addView(
+        s3.addView(
             bigButton(if (on) "Start at boot: ON" else "Start at boot: OFF", if (on) accent else panel) {
                 setAutostart(!on)
             },
             LinearLayout.LayoutParams(dp(260), dp(56))
         )
 
-        col.addView(heading("Refresh rate and FPS (Hz)"))
-        col.addView(note("Quest ties FPS to the refresh rate. Meta lists 72, 80, 90 and 120 for Quest 3. Restart a running game after changing it."))
-        col.addView(buttonRow(listOf(72, 75, 80, 90, 120, 200)) { hz ->
+        // ----- Refresh rate -----
+        val s4 = section(col, "Refresh rate and FPS (Hz)")
+        s4.addView(note("Quest ties FPS to the refresh rate. Meta lists 72, 80, 90 and 120 for Quest 3. Restart a running game after changing it."))
+        s4.addView(buttonRow(listOf(72, 75, 80, 90, 120, 200)) { hz ->
             runShell("setprop debug.oculus.refreshRate $hz", "Refresh rate and FPS set to $hz")
         })
 
         // ----- Graphics quality -----
-        col.addView(heading("Graphics quality"))
-        col.addView(note(
+        val s5 = section(col, "Graphics quality")
+        s5.addView(note(
             "These use Meta's own system settings. Restart a running game after changing them. " +
             "They go back to normal when the headset restarts. Higher settings make the headset hotter and drain the battery faster."
         ))
 
-        col.addView(bigButton("MAX GRAPHICS (all at once)", accent) {
+        s5.addView(bigButton("MAX GRAPHICS (all at once)", accent) {
             runCommands(
                 maxCmds(),
                 "Max graphics on: ${maxHz()} Hz, resolution 1.5x, foveation off, CPU and GPU level 4"
             )
         }, LinearLayout.LayoutParams(dp(380), dp(64)).apply { topMargin = dp(4) })
-        col.addView(bigButton("MIN GRAPHICS (lowest possible)", panel) {
+        s5.addView(bigButton("MIN GRAPHICS (lowest possible)", panel) {
             runCommands(
                 minCmds(),
                 "Min graphics on: 72 Hz, resolution 0.5x, strongest edge blur, CPU and GPU level 0"
             )
         }, LinearLayout.LayoutParams(dp(380), dp(64)).apply { topMargin = dp(10) })
-        col.addView(bigButton("Reset graphics to normal", panel) {
+        s5.addView(bigButton("Reset graphics to normal", panel) {
             runCommands(resetCmds, "Graphics put back to normal")
         }, LinearLayout.LayoutParams(dp(380), dp(56)).apply { topMargin = dp(10) })
 
-        col.addView(subheading("Resolution (sharpness)"))
-        col.addView(note("Multiplies the default render size of your headset. Higher is sharper but needs more power. 1.5x is a good maximum for most games. 0.5x is the lowest."))
-        col.addView(choiceRow(listOf(
+        s5.addView(subheading("Resolution (sharpness)"))
+        s5.addView(note("Multiplies the default render size of your headset. Higher is sharper but needs more power. 1.5x is a good maximum for most games. 0.5x is the lowest."))
+        s5.addView(choiceRow(listOf(
             Pair("0.5x") { runCommands(resolutionCmds(0.5), "Resolution 0.5x (lowest)") },
             Pair("0.75x") { runCommands(resolutionCmds(0.75), "Resolution 0.75x") },
             Pair("1x normal") { runCommands(resolutionCmds(1.0), "Resolution 1x") },
@@ -1227,9 +1270,9 @@ class MainActivity : Activity() {
             Pair("2x") { runCommands(resolutionCmds(2.0), "Resolution 2x (very heavy)") }
         ), 110))
 
-        col.addView(subheading("Foveated rendering (edge blur)"))
-        col.addView(note("Blurs the edges of the picture to save power. Off is the sharpest, Highest is the blurriest."))
-        col.addView(choiceRow(listOf(
+        s5.addView(subheading("Foveated rendering (edge blur)"))
+        s5.addView(note("Blurs the edges of the picture to save power. Off is the sharpest, Highest is the blurriest."))
+        s5.addView(choiceRow(listOf(
             Pair("Off") { runCommands(listOf("setprop debug.oculus.foveation.level 0"), "Foveation off") },
             Pair("Low") { runCommands(listOf("setprop debug.oculus.foveation.level 1"), "Foveation low") },
             Pair("Medium") { runCommands(listOf("setprop debug.oculus.foveation.level 2"), "Foveation medium") },
@@ -1237,16 +1280,16 @@ class MainActivity : Activity() {
             Pair("Highest") { runCommands(listOf("setprop debug.oculus.foveation.level 4"), "Foveation highest") }
         ), 120))
 
-        col.addView(subheading("Dynamic foveation"))
-        col.addView(note("Some games lower the sharpness by themselves when busy. Turn it off to keep the level you chose."))
-        col.addView(choiceRow(listOf(
+        s5.addView(subheading("Dynamic foveation"))
+        s5.addView(note("Some games lower the sharpness by themselves when busy. Turn it off to keep the level you chose."))
+        s5.addView(choiceRow(listOf(
             Pair("Dynamic off") { runCommands(listOf("setprop debug.oculus.foveation.dynamic 0"), "Dynamic foveation off") },
             Pair("Dynamic default") { runCommands(listOf("setprop debug.oculus.foveation.dynamic ''"), "Dynamic foveation back to default") }
         ), 190))
 
-        col.addView(subheading("Processor power"))
-        col.addView(note("Forces the headset's CPU and GPU to a power level. 4 is high, 0 is the lowest."))
-        col.addView(choiceRow(listOf(
+        s5.addView(subheading("Processor power"))
+        s5.addView(note("Forces the headset's CPU and GPU to a power level. 4 is high, 0 is the lowest."))
+        s5.addView(choiceRow(listOf(
             Pair("CPU max") { runCommands(listOf("setprop debug.oculus.cpuLevel 4"), "CPU level 4") },
             Pair("GPU max") { runCommands(listOf("setprop debug.oculus.gpuLevel 4"), "GPU level 4") },
             Pair("Both max") {
@@ -1269,15 +1312,17 @@ class MainActivity : Activity() {
             }
         ), 150))
 
-        col.addView(heading("Tile style"))
+        // ----- Tile style -----
+        val s6 = section(col, "Tile style")
         val styleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         styleRow.addView(bigButton("Icons", if (style == Kind.ICON) accent else panel) { setStyle(Kind.ICON) },
             LinearLayout.LayoutParams(dp(160), dp(56)).apply { setMargins(0, 0, dp(12), 0) })
         styleRow.addView(bigButton("Banners", if (style == Kind.BANNER) accent else panel) { setStyle(Kind.BANNER) },
             LinearLayout.LayoutParams(dp(160), dp(56)))
-        col.addView(styleRow)
+        s6.addView(styleRow)
 
-        col.addView(heading("Store pictures"))
+        // ----- Store pictures -----
+        val s7 = section(col, "Store pictures")
         val artText = TextView(this).apply {
             text = art.stats()
             setTextColor(Color.WHITE)
@@ -1285,27 +1330,22 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(8))
         }
         artStatsView = artText
-        col.addView(artText)
-        col.addView(bigButton("Refresh pictures", panel) {
+        s7.addView(artText)
+        s7.addView(bigButton("Refresh pictures", panel) {
             art.refresh(allApps.map { it.pkg })
             artText.text = art.stats()
         }, LinearLayout.LayoutParams(dp(220), dp(56)))
-        col.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet. Long-press any tile to move it between Apps and Games, or to open its app info."))
+        s7.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet. Long-press any tile to move it between Apps and Games, or to open its app info."))
         return scroll
     }
 
     private fun buttonRow(values: List<Int>, onClick: (Int) -> Unit): View {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         values.forEach { v ->
-            val b = Button(this).apply {
-                text = v.toString()
-                textSize = 20f
-                isAllCaps = false
-                setTextColor(Color.WHITE)
-                background = round(panel, 14)
-                setOnClickListener { onClick(v) }
-            }
-            row.addView(b, LinearLayout.LayoutParams(dp(110), dp(60)).apply { setMargins(0, 0, dp(10), 0) })
+            row.addView(
+                bigButton(v.toString(), panel) { onClick(v) },
+                LinearLayout.LayoutParams(dp(110), dp(60)).apply { setMargins(0, 0, dp(10), 0) }
+            )
         }
         return row
     }
@@ -1445,12 +1485,13 @@ class MainActivity : Activity() {
 
     // ---------- helpers ----------
 
+    /** Button: white buttons get black text, every other button gets white text. */
     private fun bigButton(label: String, color: Int, onClick: () -> Unit) = Button(this).apply {
         text = label
         isAllCaps = false
         textSize = 18f
-        setTextColor(Color.WHITE)
-        background = round(color, 14)
+        setTextColor(if (color == accent) Color.BLACK else Color.WHITE)
+        background = stateBg(color, 14)
         setOnClickListener { onClick() }
     }
 
@@ -1459,7 +1500,7 @@ class MainActivity : Activity() {
         setTextColor(Color.WHITE)
         textSize = 22f
         setTypeface(null, Typeface.BOLD)
-        setPadding(0, dp(24), 0, dp(8))
+        setPadding(0, dp(12), 0, dp(8))
     }
 
     private fun subheading(t: String) = TextView(this).apply {
@@ -1472,7 +1513,7 @@ class MainActivity : Activity() {
 
     private fun note(t: String) = TextView(this).apply {
         text = t
-        setTextColor(Color.LTGRAY)
+        setTextColor(Color.parseColor("#B0B0B0"))
         textSize = 14f
         setPadding(0, 0, 0, dp(8))
     }
@@ -1480,6 +1521,26 @@ class MainActivity : Activity() {
     private fun round(color: Int, r: Int) = GradientDrawable().apply {
         setColor(color)
         cornerRadius = dp(r).toFloat()
+    }
+
+    /** Rounded background that changes when you point at it or press it. */
+    private fun stateBg(color: Int, r: Int): StateListDrawable {
+        val lighter = if (color == accent) Color.parseColor("#CFCFCF") else Color.parseColor("#3E3E3E")
+        val hoverBorder = GradientDrawable().apply {
+            setColor(lighter)
+            cornerRadius = dp(r).toFloat()
+            setStroke(dp(2), Color.WHITE)
+        }
+        val pressed = GradientDrawable().apply {
+            setColor(lighter)
+            cornerRadius = dp(r).toFloat()
+        }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), pressed)
+            addState(intArrayOf(android.R.attr.state_hovered), hoverBorder)
+            addState(intArrayOf(android.R.attr.state_focused), hoverBorder)
+            addState(intArrayOf(), round(color, r))
+        }
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
