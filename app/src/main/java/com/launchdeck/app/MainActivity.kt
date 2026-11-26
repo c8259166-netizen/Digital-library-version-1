@@ -375,6 +375,11 @@ class MainActivity : Activity() {
     private val accent = Color.WHITE                     // selected / main buttons
     private val discordUrl = "https://discord.gg/5DCpxypsD"
 
+    // Tabs: 0 Everything, 1 Apps, 2 Games, 3 Recent, 4 Tools
+    private val tabNames = listOf("Everything", "Apps", "Games", "Recent", "Tools")
+    private val toolsTab = 4
+    private var currentTab = 0
+
     private var allApps: List<AppEntry> = emptyList()
     private lateinit var screen: FrameLayout
     private lateinit var content: FrameLayout
@@ -421,6 +426,7 @@ class MainActivity : Activity() {
         style = if (prefs().getString("style", "icon") == "banner") Kind.BANNER else Kind.ICON
         art = ArtStore(this) {
             gridRefresh?.invoke()
+            updateTabLabels()
             artStatsView?.text = art.stats()
         }
         art.prefetchNames(allApps.map { it.pkg })
@@ -440,7 +446,7 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------- Game or app ----------
+    // ---------- Game or app, pins, recent ----------
 
     private fun isGame(e: AppEntry): Boolean {
         when (prefs().getString("cat_" + e.pkg, null)) {
@@ -455,31 +461,43 @@ class MainActivity : Activity() {
         return e.isVr || e.androidGame
     }
 
+    private fun isPinned(e: AppEntry): Boolean = prefs().getBoolean("pin_" + e.pkg, false)
+
+    private fun lastLaunch(e: AppEntry): Long = prefs().getLong("last_" + e.pkg, 0L)
+
     private fun moveDialog(e: AppEntry) {
+        val pinned = isPinned(e)
         val options = arrayOf(
             "Move to Games",
             "Move to Apps",
             "Back to automatic",
+            if (pinned) "Unpin from the top" else "Pin to top",
             "App info (Android settings)"
         )
         android.app.AlertDialog.Builder(this)
             .setTitle(labelOf(e))
             .setItems(options) { _, which ->
-                if (which == 3) {
-                    openSettings(
+                when (which) {
+                    4 -> openSettings(
                         "app info",
                         listOf("am start -a android.settings.APPLICATION_DETAILS_SETTINGS -d package:${e.pkg}"),
                         listOf(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + e.pkg)))
                     )
-                } else {
-                    val ed = prefs().edit()
-                    when (which) {
-                        0 -> ed.putString("cat_" + e.pkg, "game")
-                        1 -> ed.putString("cat_" + e.pkg, "app")
-                        else -> ed.remove("cat_" + e.pkg)
+                    3 -> {
+                        prefs().edit().putBoolean("pin_" + e.pkg, !pinned).apply()
+                        gridRefresh?.invoke()
                     }
-                    ed.apply()
-                    gridRefresh?.invoke()
+                    else -> {
+                        val ed = prefs().edit()
+                        when (which) {
+                            0 -> ed.putString("cat_" + e.pkg, "game")
+                            1 -> ed.putString("cat_" + e.pkg, "app")
+                            else -> ed.remove("cat_" + e.pkg)
+                        }
+                        ed.apply()
+                        gridRefresh?.invoke()
+                        updateTabLabels()
+                    }
                 }
             }
             .show()
@@ -632,6 +650,17 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(4), 0, 0, dp(10))
         }
+        // Your logo (the app icon) next to the title, if the picture is in the project.
+        val logoId = resources.getIdentifier("ic_launcher", "drawable", packageName)
+        if (logoId != 0) {
+            titleRow.addView(
+                ImageView(this).apply {
+                    setImageResource(logoId)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                },
+                LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(14) }
+            )
+        }
         titleRow.addView(TextView(this).apply {
             text = "Digital Library"
             setTextColor(Color.WHITE)
@@ -645,8 +674,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val names = listOf("Everything", "Apps", "Games", "Tools")
-        names.forEachIndexed { i, name ->
+        tabNames.forEachIndexed { i, name ->
             val b = Button(this).apply {
                 text = name
                 isAllCaps = false
@@ -665,21 +693,38 @@ class MainActivity : Activity() {
         showTab(0)
     }
 
-    private fun showTab(index: Int) {
+    /** Tab names with the number of apps in each, and the selected tab in white. */
+    private fun updateTabLabels() {
+        if (tabButtons.size != tabNames.size) return
+        val counts = listOf(
+            allApps.size,
+            allApps.count { !isGame(it) },
+            allApps.count { isGame(it) },
+            null,
+            null
+        )
         tabButtons.forEachIndexed { i, b ->
-            val selected = i == index
+            val selected = i == currentTab
+            val n = counts[i]
+            b.text = if (n != null) "${tabNames[i]}  $n" else tabNames[i]
             b.background = stateBg(if (selected) accent else panel, 14)
             b.setTextColor(if (selected) Color.BLACK else Color.WHITE)
         }
+    }
+
+    private fun showTab(index: Int) {
+        currentTab = index
+        updateTabLabels()
         content.removeAllViews()
         statusView = null
         gridRefresh = null
         artStatsView = null
         when (index) {
-            0 -> content.addView(appGrid { true })
-            1 -> content.addView(appGrid { !isGame(it) })
-            2 -> content.addView(appGrid { isGame(it) })
-            3 -> content.addView(toolsPage())
+            0 -> content.addView(appGrid({ true }, false))
+            1 -> content.addView(appGrid({ !isGame(it) }, false))
+            2 -> content.addView(appGrid({ isGame(it) }, false))
+            3 -> content.addView(appGrid({ lastLaunch(it) > 0L }, true))
+            toolsTab -> content.addView(toolsPage())
         }
     }
 
@@ -687,7 +732,9 @@ class MainActivity : Activity() {
 
     private fun labelOf(e: AppEntry): String = art.nameOf(e.pkg) ?: e.label
 
-    private fun appGrid(filter: (AppEntry) -> Boolean): View {
+    private fun tileLabel(e: AppEntry): String = (if (isPinned(e)) "\u2605 " else "") + labelOf(e)
+
+    private fun appGrid(filter: (AppEntry) -> Boolean, recent: Boolean): View {
         var shown: List<AppEntry> = emptyList()
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
@@ -704,8 +751,14 @@ class MainActivity : Activity() {
 
         fun compute() {
             val q = search.text.toString().trim().lowercase()
-            shown = allApps.filter(filter).filter {
+            val list = allApps.filter(filter).filter {
                 q.isEmpty() || labelOf(it).lowercase().contains(q) || it.label.lowercase().contains(q)
+            }
+            shown = if (recent) {
+                list.sortedByDescending { lastLaunch(it) }.take(18)
+            } else {
+                // Pinned apps first, the rest stay in alphabetical order.
+                list.sortedByDescending { if (isPinned(it)) 1 else 0 }
             }
         }
         compute()
@@ -739,7 +792,7 @@ class MainActivity : Activity() {
         }
 
         val empty = TextView(this).apply {
-            text = "Nothing found"
+            text = if (recent) "Apps you open will show up here" else "Nothing found"
             setTextColor(Color.GRAY)
             textSize = 18f
             gravity = Gravity.CENTER
@@ -779,7 +832,7 @@ class MainActivity : Activity() {
         }
         tile.addView(pic, LinearLayout.LayoutParams(dp(88), dp(88)))
         tile.addView(TextView(this).apply {
-            text = labelOf(e)
+            text = tileLabel(e)
             setTextColor(Color.WHITE)
             textSize = 14f
             gravity = Gravity.CENTER
@@ -803,7 +856,7 @@ class MainActivity : Activity() {
             tile.addView(localPicture(e), FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
         }
         tile.addView(TextView(this).apply {
-            text = labelOf(e)
+            text = tileLabel(e)
             setTextColor(Color.WHITE)
             textSize = 14f
             maxLines = 1
@@ -842,6 +895,7 @@ class MainActivity : Activity() {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
             startActivity(i)
+            prefs().edit().putLong("last_" + e.pkg, System.currentTimeMillis()).apply()
         } catch (ex: Exception) {
             Toast.makeText(this, "Couldn't open ${labelOf(e)}", Toast.LENGTH_SHORT).show()
         }
@@ -914,7 +968,7 @@ class MainActivity : Activity() {
     private fun setStyle(k: Kind) {
         style = k
         prefs().edit().putString("style", if (k == Kind.BANNER) "banner" else "icon").apply()
-        showTab(3)
+        showTab(toolsTab)
     }
 
     private fun tryOpen(what: String, vararg intents: Intent?) {
@@ -1001,7 +1055,7 @@ class MainActivity : Activity() {
         } else {
             Toast.makeText(this, "Start at boot is off", Toast.LENGTH_SHORT).show()
         }
-        showTab(3)
+        showTab(toolsTab)
     }
 
     // ---------- Graphics quality ----------
@@ -1335,7 +1389,7 @@ class MainActivity : Activity() {
             art.refresh(allApps.map { it.pkg })
             artText.text = art.stats()
         }, LinearLayout.LayoutParams(dp(220), dp(56)))
-        s7.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet. Long-press any tile to move it between Apps and Games, or to open its app info."))
+        s7.addView(note("Pictures and names come from the MetaMetadata project, the same source Lightning Launcher uses. Needs internet. Long-press any tile to move it between Apps and Games, pin it to the top, or open its app info."))
         return scroll
     }
 
